@@ -39,19 +39,91 @@ jobs:
       - name: Extract Android project
         run: |
           unzip -o RootScope-Android-project.zip -d /tmp/rootscope
+
           PROJECT_DIR="$(find /tmp/rootscope -type f -name 'settings.gradle.kts' -print -quit | xargs -r dirname)"
 
           if [ -z "$PROJECT_DIR" ] || [ ! -d "$PROJECT_DIR/app" ]; then
-            echo "::error::В архиве не найдена папка app/ рядом с settings.gradle.kts"
+            echo "::error::Не найдена папка app/ в архиве"
             find /tmp/rootscope -maxdepth 4 -print
             exit 1
           fi
 
           cp -a "$PROJECT_DIR"/. .
 
+      - name: Fix Java and Kotlin JVM targets
+        shell: bash
+        run: |
+          FILE="app/build.gradle.kts"
+
+          if [ ! -f "$FILE" ]; then
+            echo "::error::Не найден $FILE"
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("app/build.gradle.kts")
+          s = p.read_text()
+
+          def fix_block(text, name, body):
+              pattern = rf'(?m)^[ \t]*{name}[ \t]*\{{'
+              matches = list(re.finditer(pattern, text))
+              if matches:
+                  start = matches[-1].start()
+                  brace = text.find("{", matches[-1].start())
+                  depth = 0
+                  end = None
+                  for i in range(brace, len(text)):
+                      if text[i] == "{":
+                          depth += 1
+                      elif text[i] == "}":
+                          depth -= 1
+                          if depth == 0:
+                              end = i + 1
+                              break
+                  if end is None:
+                      raise SystemExit(f"Не удалось разобрать блок {name}")
+                  text = text[:start] + body + text[end:]
+              else:
+                  pos = re.search(r'(?m)^android[ \t]*\{', text)
+                  if not pos:
+                      raise SystemExit("В build.gradle.kts не найден блок android {")
+                  brace = text.find("{", pos.start())
+                  depth = 0
+                  end = None
+                  for i in range(brace, len(text)):
+                      if text[i] == "{":
+                          depth += 1
+                      elif text[i] == "}":
+                          depth -= 1
+                          if depth == 0:
+                              end = i
+                              break
+                  if end is None:
+                      raise SystemExit("Не удалось разобрать блок android")
+                  text = text[:end] + "\n\n" + body + "\n" + text[end:]
+              return text
+
+          s = fix_block(s, "compileOptions", """    compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }""")
+
+          s = fix_block(s, "kotlinOptions", """    kotlinOptions {
+                  jvmTarget = "17"
+              }""")
+
+          p.write_text(s)
+          print("Настройки Java и Kotlin установлены на JVM 17.")
+          PY
+
+          echo "Исправленные настройки:"
+          grep -A 4 -E 'compileOptions|kotlinOptions' "$FILE"
+
       - name: Check project structure
         run: |
-          ls -la
           test -f settings.gradle.kts
           test -d app
           gradle --no-daemon projects

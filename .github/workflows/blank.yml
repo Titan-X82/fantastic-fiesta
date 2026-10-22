@@ -142,9 +142,6 @@ jobs:
           import re
 
           p = Path("app/build.gradle.kts")
-          if not p.is_file():
-              raise SystemExit("Не найден app/build.gradle.kts")
-
           s = p.read_text()
 
           if re.search(r'androidx\.activity:activity(?:-ktx)?:', s):
@@ -214,17 +211,22 @@ jobs:
               s
           )
 
-          if not re.search(
-              r'(?m)^import androidx\.activity\.ComponentActivity[ \t]*$',
-              s
-          ):
-              package = re.search(r'(?m)^package .*$', s)
+          imports = [
+              "androidx.activity.ComponentActivity",
+              "androidx.activity.result.contract.ActivityResultContracts",
+          ]
 
-              if package:
-                  pos = package.end()
-                  s = s[:pos] + "\n\nimport androidx.activity.ComponentActivity" + s[pos:]
-              else:
-                  s = "import androidx.activity.ComponentActivity\n" + s
+          for item in imports:
+              pattern = r'(?m)^import ' + re.escape(item) + r'[ \t]*$'
+
+              if not re.search(pattern, s):
+                  package = re.search(r'(?m)^package .*$', s)
+
+                  if package:
+                      pos = package.end()
+                      s = s[:pos] + "\n\nimport " + item + s[pos:]
+                  else:
+                      s = "import " + item + "\n" + s
 
           s, count = re.subn(
               r'(\bclass\s+MainActivity\s*:\s*)Activity\s*\(',
@@ -240,7 +242,7 @@ jobs:
               raise SystemExit("Не удалось изменить базовый класс MainActivity")
 
           p.write_text(s)
-          print("MainActivity использует ComponentActivity.")
+          print("Импорты и базовый класс MainActivity обновлены.")
           PY
 
       - name: Check project structure

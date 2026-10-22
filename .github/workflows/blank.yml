@@ -1,4 +1,32 @@
-- name: Set up Gradle
+name: Build RootScope APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "8.14.6"
@@ -11,12 +39,10 @@
       - name: Extract Android project
         run: |
           unzip -o RootScope-Android-project.zip -d /tmp/rootscope
-
           PROJECT_DIR="$(find /tmp/rootscope -type f -name 'settings.gradle.kts' -print -quit | xargs -r dirname)"
 
           if [ -z "$PROJECT_DIR" ] || [ ! -d "$PROJECT_DIR/app" ]; then
-            echo "::error::Не найдена папка app/ внутри RootScope-Android-project.zip"
-            echo "Содержимое архива:"
+            echo "::error::В архиве не найдена папка app/ рядом с settings.gradle.kts"
             find /tmp/rootscope -maxdepth 4 -print
             exit 1
           fi
@@ -25,20 +51,13 @@
 
       - name: Check project structure
         run: |
-          echo "Корень репозитория:"
           ls -la
-
-          if [ ! -f settings.gradle.kts ] || [ ! -d app ]; then
-            echo "::error::В корне проекта отсутствует settings.gradle.kts или app/"
-            exit 1
-          fi
-
-          echo "Найден Android-модуль app/"
+          test -f settings.gradle.kts
+          test -d app
           gradle --no-daemon projects
 
       - name: Build APK
-        run: |
-          gradle --no-daemon assembleDebug
+        run: gradle --no-daemon assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

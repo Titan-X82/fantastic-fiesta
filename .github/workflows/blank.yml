@@ -32,7 +32,9 @@ jobs:
           gradle-version: "8.14.6"
 
       - name: Install Android SDK packages
+        shell: bash
         run: |
+          set -euo pipefail
           sdkmanager --licenses </dev/null
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
@@ -52,7 +54,7 @@ jobs:
           PROJECT_DIR="$(find /tmp/rootscope -type f -name 'settings.gradle.kts' -print -quit | xargs -r dirname)"
 
           if [ -z "$PROJECT_DIR" ] || [ ! -d "$PROJECT_DIR/app" ]; then
-            echo "::error::В архиве не найдена структура Android-проекта"
+            echo "::error::Не найдена папка app/ в архиве"
             find /tmp/rootscope -maxdepth 5 -print
             exit 1
           fi
@@ -72,9 +74,6 @@ jobs:
           import re
 
           p = Path("app/build.gradle.kts")
-          if not p.is_file():
-              raise SystemExit("Не найден app/build.gradle.kts")
-
           s = p.read_text()
 
           def find_block(text, name):
@@ -109,8 +108,8 @@ jobs:
               if not android:
                   raise SystemExit("Не найден блок android {}")
 
-              _, android_end = android
-              return text[:android_end - 1] + "\n\n" + body + "\n" + text[android_end - 1:]
+              _, end = android
+              return text[:end - 1] + "\n\n" + body + "\n" + text[end - 1:]
 
           s = replace_or_insert(
               s,
@@ -130,7 +129,7 @@ jobs:
           )
 
           p.write_text(s)
-          print("Настройки Java и Kotlin установлены на JVM 17.")
+          print("Java и Kotlin настроены на JVM 17.")
           PY
 
       - name: Add AndroidX Activity dependency
@@ -143,36 +142,46 @@ jobs:
           import re
 
           p = Path("app/build.gradle.kts")
+          if not p.is_file():
+              raise SystemExit("Не найден app/build.gradle.kts")
+
           s = p.read_text()
 
           if re.search(r'androidx\.activity:activity(?:-ktx)?:', s):
-              print("Зависимость AndroidX Activity уже указана.")
+              print("Зависимость AndroidX Activity уже есть.")
           else:
-              match = re.search(r'(?m)^[ \t]*dependencies[ \t]*\{', s)
+              match = re.search(r'\bdependencies\s*\{', s)
 
-              if not match:
-                  raise SystemExit("Не найден блок dependencies {} в app/build.gradle.kts")
+              if match:
+                  brace = s.find("{", match.start())
+                  depth = 0
+                  end = None
 
-              brace = s.find("{", match.start())
-              depth = 0
-              end = None
+                  for i in range(brace, len(s)):
+                      if s[i] == "{":
+                          depth += 1
+                      elif s[i] == "}":
+                          depth -= 1
+                          if depth == 0:
+                              end = i
+                              break
 
-              for i in range(brace, len(s)):
-                  if s[i] == "{":
-                      depth += 1
-                  elif s[i] == "}":
-                      depth -= 1
-                      if depth == 0:
-                          end = i
-                          break
+                  if end is None:
+                      raise SystemExit("Блок dependencies не закрыт.")
 
-              if end is None:
-                  raise SystemExit("Не удалось разобрать блок dependencies")
+                  s = (
+                      s[:end]
+                      + '\n    implementation("androidx.activity:activity-ktx:1.10.1")\n'
+                      + s[end:]
+                  )
+              else:
+                  s += (
+                      '\n\ndependencies {\n'
+                      '    implementation("androidx.activity:activity-ktx:1.10.1")\n'
+                      '}\n'
+                  )
 
-              dependency = '\n    implementation("androidx.activity:activity-ktx:1.10.1")\n'
-              s = s[:end] + dependency + s[end:]
               p.write_text(s)
-
               print("Добавлена зависимость AndroidX Activity.")
           PY
 
@@ -197,9 +206,7 @@ jobs:
           s = p.read_text()
 
           if "registerForActivityResult" not in s:
-              raise SystemExit(
-                  "Не найден registerForActivityResult в MainActivity.kt"
-              )
+              raise SystemExit("Не найден registerForActivityResult в MainActivity.kt")
 
           s = re.sub(
               r'(?m)^import android\.app\.Activity[ \t]*\n?',
@@ -215,11 +222,7 @@ jobs:
 
               if package:
                   pos = package.end()
-                  s = (
-                      s[:pos]
-                      + "\n\nimport androidx.activity.ComponentActivity"
-                      + s[pos:]
-                  )
+                  s = s[:pos] + "\n\nimport androidx.activity.ComponentActivity" + s[pos:]
               else:
                   s = "import androidx.activity.ComponentActivity\n" + s
 
@@ -234,9 +237,7 @@ jobs:
               r'\bclass\s+MainActivity\s*:\s*ComponentActivity\s*\(',
               s
           ):
-              raise SystemExit(
-                  "Не удалось изменить базовый класс MainActivity"
-              )
+              raise SystemExit("Не удалось изменить базовый класс MainActivity")
 
           p.write_text(s)
           print("MainActivity использует ComponentActivity.")
@@ -252,7 +253,10 @@ jobs:
           gradle --no-daemon projects
 
       - name: Build APK
-        run: gradle --no-daemon assembleDebug
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

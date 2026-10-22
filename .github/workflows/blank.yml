@@ -37,6 +37,7 @@ jobs:
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
       - name: Extract Android project
+        shell: bash
         run: |
           unzip -o RootScope-Android-project.zip -d /tmp/rootscope
 
@@ -53,26 +54,21 @@ jobs:
       - name: Fix Java and Kotlin JVM targets
         shell: bash
         run: |
-          FILE="app/build.gradle.kts"
-
-          if [ ! -f "$FILE" ]; then
-            echo "::error::Не найден $FILE"
-            exit 1
-          fi
-
           python3 - <<'PY'
           from pathlib import Path
           import re
 
           p = Path("app/build.gradle.kts")
+          if not p.is_file():
+              raise SystemExit("Не найден app/build.gradle.kts")
+
           s = p.read_text()
 
-          def fix_block(text, name, body):
-              pattern = rf'(?m)^[ \t]*{name}[ \t]*\{{'
-              matches = list(re.finditer(pattern, text))
-              if matches:
-                  start = matches[-1].start()
-                  brace = text.find("{", matches[-1].start())
+          def replace_block(text, name, body):
+              match = re.search(r'(?m)^[ \t]*' + re.escape(name) + r'[ \t]*\{', text)
+              if match:
+                  start = match.start()
+                  brace = text.find("{", match.start())
                   depth = 0
                   end = None
                   for i in range(brace, len(text)):
@@ -84,43 +80,84 @@ jobs:
                               end = i + 1
                               break
                   if end is None:
-                      raise SystemExit(f"Не удалось разобрать блок {name}")
-                  text = text[:start] + body + text[end:]
-              else:
-                  pos = re.search(r'(?m)^android[ \t]*\{', text)
-                  if not pos:
-                      raise SystemExit("В build.gradle.kts не найден блок android {")
-                  brace = text.find("{", pos.start())
-                  depth = 0
-                  end = None
-                  for i in range(brace, len(text)):
-                      if text[i] == "{":
-                          depth += 1
-                      elif text[i] == "}":
-                          depth -= 1
-                          if depth == 0:
-                              end = i
-                              break
-                  if end is None:
-                      raise SystemExit("Не удалось разобрать блок android")
-                  text = text[:end] + "\n\n" + body + "\n" + text[end:]
-              return text
+                      raise SystemExit("Не удалось разобрать блок " + name)
+                  return text[:start] + body + text[end:]
 
-          s = fix_block(s, "compileOptions", """    compileOptions {
+              android = re.search(r'(?m)^[ \t]*android[ \t]*\{', text)
+              if not android:
+                  raise SystemExit("Не найден блок android {")
+              brace = text.find("{", android.start())
+              depth = 0
+              for i in range(brace, len(text)):
+                  if text[i] == "{":
+                      depth += 1
+                  elif text[i] == "}":
+                      depth -= 1
+                      if depth == 0:
+                          return text[:i] + "\n\n" + body + "\n" + text[i:]
+              raise SystemExit("Не удалось разобрать блок android")
+
+          s = replace_block(s, "compileOptions", """    compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
                   targetCompatibility = JavaVersion.VERSION_17
               }""")
 
-          s = fix_block(s, "kotlinOptions", """    kotlinOptions {
+          s = replace_block(s, "kotlinOptions", """    kotlinOptions {
                   jvmTarget = "17"
               }""")
 
           p.write_text(s)
-          print("Настройки Java и Kotlin установлены на JVM 17.")
+          print("Java и Kotlin настроены на JVM 17.")
           PY
 
-          echo "Исправленные настройки:"
-          grep -A 4 -E 'compileOptions|kotlinOptions' "$FILE"
+      - name: Fix MainActivity
+        shell: bash
+        run: |
+          FILE="app/src/main/java/com/rootscope/scanner/MainActivity.kt"
+
+          if [ ! -f "$FILE" ]; then
+            echo "::error::Не найден $FILE"
+            find app/src -name 'MainActivity.kt' -print
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("app/src/main/java/com/rootscope/scanner/MainActivity.kt")
+          s = p.read_text()
+
+          if "registerForActivityResult" not in s:
+              raise SystemExit("Не найден registerForActivityResult — проверь исходный файл")
+
+          s = re.sub(
+              r'(?m)^import android\.app\.Activity\s*$\n?',
+              '',
+              s
+          )
+
+          if not re.search(r'(?m)^import androidx\.activity\.ComponentActivity\s*$', s):
+              package = re.search(r'(?m)^package .*$', s)
+              if package:
+                  pos = package.end()
+                  s = s[:pos] + "\n\nimport androidx.activity.ComponentActivity" + s[pos:]
+              else:
+                  s = "import androidx.activity.ComponentActivity\n" + s
+
+          s, count = re.subn(
+              r'(\bclass\s+MainActivity\s*:\s*)Activity\s*\(',
+              r'\1ComponentActivity(',
+              s,
+              count=1
+          )
+
+          if count == 0 and "class MainActivity : ComponentActivity(" not in s:
+              raise SystemExit("Не удалось изменить базовый класс MainActivity")
+
+          p.write_text(s)
+          print("MainActivity настроен на ComponentActivity.")
+          PY
 
       - name: Check project structure
         run: |

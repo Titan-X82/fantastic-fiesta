@@ -33,27 +33,40 @@ jobs:
 
       - name: Install Android SDK packages
         run: |
-          yes | sdkmanager --licenses
+          sdkmanager --licenses </dev/null
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
       - name: Extract Android project
         shell: bash
         run: |
+          set -euo pipefail
+
+          if [ ! -f "RootScope-Android-project.zip" ]; then
+            echo "::error::Не найден RootScope-Android-project.zip в корне репозитория"
+            exit 1
+          fi
+
+          mkdir -p /tmp/rootscope
           unzip -o RootScope-Android-project.zip -d /tmp/rootscope
 
           PROJECT_DIR="$(find /tmp/rootscope -type f -name 'settings.gradle.kts' -print -quit | xargs -r dirname)"
 
           if [ -z "$PROJECT_DIR" ] || [ ! -d "$PROJECT_DIR/app" ]; then
-            echo "::error::Не найдена папка app/ в архиве"
-            find /tmp/rootscope -maxdepth 4 -print
+            echo "::error::В архиве не найдена структура Android-проекта"
+            find /tmp/rootscope -maxdepth 5 -print
             exit 1
           fi
 
           cp -a "$PROJECT_DIR"/. .
 
+          test -f settings.gradle.kts
+          test -f app/build.gradle.kts
+
       - name: Fix Java and Kotlin JVM targets
         shell: bash
         run: |
+          set -euo pipefail
+
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -64,55 +77,110 @@ jobs:
 
           s = p.read_text()
 
-          def replace_block(text, name, body):
-              match = re.search(r'(?m)^[ \t]*' + re.escape(name) + r'[ \t]*\{', text)
-              if match:
-                  start = match.start()
-                  brace = text.find("{", match.start())
-                  depth = 0
-                  end = None
-                  for i in range(brace, len(text)):
-                      if text[i] == "{":
-                          depth += 1
-                      elif text[i] == "}":
-                          depth -= 1
-                          if depth == 0:
-                              end = i + 1
-                              break
-                  if end is None:
-                      raise SystemExit("Не удалось разобрать блок " + name)
-                  return text[:start] + body + text[end:]
+          def find_block(text, name):
+              match = re.search(
+                  r'(?m)^[ \t]*' + re.escape(name) + r'[ \t]*\{',
+                  text
+              )
+              if not match:
+                  return None
 
-              android = re.search(r'(?m)^[ \t]*android[ \t]*\{', text)
-              if not android:
-                  raise SystemExit("Не найден блок android {")
-              brace = text.find("{", android.start())
+              brace = text.find("{", match.start())
               depth = 0
+
               for i in range(brace, len(text)):
                   if text[i] == "{":
                       depth += 1
                   elif text[i] == "}":
                       depth -= 1
                       if depth == 0:
-                          return text[:i] + "\n\n" + body + "\n" + text[i:]
-              raise SystemExit("Не удалось разобрать блок android")
+                          return match.start(), i + 1
 
-          s = replace_block(s, "compileOptions", """    compileOptions {
+              raise SystemExit("Не удалось разобрать блок " + name)
+
+          def replace_or_insert(text, name, body):
+              bounds = find_block(text, name)
+
+              if bounds:
+                  start, end = bounds
+                  return text[:start] + body + text[end:]
+
+              android = find_block(text, "android")
+              if not android:
+                  raise SystemExit("Не найден блок android {}")
+
+              _, android_end = android
+              return text[:android_end - 1] + "\n\n" + body + "\n" + text[android_end - 1:]
+
+          s = replace_or_insert(
+              s,
+              "compileOptions",
+              """    compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
                   targetCompatibility = JavaVersion.VERSION_17
-              }""")
+              }"""
+          )
 
-          s = replace_block(s, "kotlinOptions", """    kotlinOptions {
+          s = replace_or_insert(
+              s,
+              "kotlinOptions",
+              """    kotlinOptions {
                   jvmTarget = "17"
-              }""")
+              }"""
+          )
 
           p.write_text(s)
-          print("Java и Kotlin настроены на JVM 17.")
+          print("Настройки Java и Kotlin установлены на JVM 17.")
+          PY
+
+      - name: Add AndroidX Activity dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("app/build.gradle.kts")
+          s = p.read_text()
+
+          if re.search(r'androidx\.activity:activity(?:-ktx)?:', s):
+              print("Зависимость AndroidX Activity уже указана.")
+          else:
+              match = re.search(r'(?m)^[ \t]*dependencies[ \t]*\{', s)
+
+              if not match:
+                  raise SystemExit("Не найден блок dependencies {} в app/build.gradle.kts")
+
+              brace = s.find("{", match.start())
+              depth = 0
+              end = None
+
+              for i in range(brace, len(s)):
+                  if s[i] == "{":
+                      depth += 1
+                  elif s[i] == "}":
+                      depth -= 1
+                      if depth == 0:
+                          end = i
+                          break
+
+              if end is None:
+                  raise SystemExit("Не удалось разобрать блок dependencies")
+
+              dependency = '\n    implementation("androidx.activity:activity-ktx:1.10.1")\n'
+              s = s[:end] + dependency + s[end:]
+              p.write_text(s)
+
+              print("Добавлена зависимость AndroidX Activity.")
           PY
 
       - name: Fix MainActivity
         shell: bash
         run: |
+          set -euo pipefail
+
           FILE="app/src/main/java/com/rootscope/scanner/MainActivity.kt"
 
           if [ ! -f "$FILE" ]; then
@@ -129,19 +197,29 @@ jobs:
           s = p.read_text()
 
           if "registerForActivityResult" not in s:
-              raise SystemExit("Не найден registerForActivityResult — проверь исходный файл")
+              raise SystemExit(
+                  "Не найден registerForActivityResult в MainActivity.kt"
+              )
 
           s = re.sub(
-              r'(?m)^import android\.app\.Activity\s*$\n?',
+              r'(?m)^import android\.app\.Activity[ \t]*\n?',
               '',
               s
           )
 
-          if not re.search(r'(?m)^import androidx\.activity\.ComponentActivity\s*$', s):
+          if not re.search(
+              r'(?m)^import androidx\.activity\.ComponentActivity[ \t]*$',
+              s
+          ):
               package = re.search(r'(?m)^package .*$', s)
+
               if package:
                   pos = package.end()
-                  s = s[:pos] + "\n\nimport androidx.activity.ComponentActivity" + s[pos:]
+                  s = (
+                      s[:pos]
+                      + "\n\nimport androidx.activity.ComponentActivity"
+                      + s[pos:]
+                  )
               else:
                   s = "import androidx.activity.ComponentActivity\n" + s
 
@@ -152,17 +230,25 @@ jobs:
               count=1
           )
 
-          if count == 0 and "class MainActivity : ComponentActivity(" not in s:
-              raise SystemExit("Не удалось изменить базовый класс MainActivity")
+          if count == 0 and not re.search(
+              r'\bclass\s+MainActivity\s*:\s*ComponentActivity\s*\(',
+              s
+          ):
+              raise SystemExit(
+                  "Не удалось изменить базовый класс MainActivity"
+              )
 
           p.write_text(s)
-          print("MainActivity настроен на ComponentActivity.")
+          print("MainActivity использует ComponentActivity.")
           PY
 
       - name: Check project structure
+        shell: bash
         run: |
+          set -euo pipefail
           test -f settings.gradle.kts
-          test -d app
+          test -f app/build.gradle.kts
+          test -d app/src
           gradle --no-daemon projects
 
       - name: Build APK
